@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+node_modules/
+frontend/dist/
+frontend/*.tsbuildinfo
+data/
+.env
+*.mp3
+*.wav
+*.flac
+*.m4a
+*.mid
+*.pt
+*.pth
+*.onnx
