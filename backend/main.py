@@ -42,9 +42,22 @@ try:
     from fastapi import FastAPI, File, HTTPException, UploadFile
     from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
     from fastapi.middleware.cors import CORSMiddleware
+    from fastapi.staticfiles import StaticFiles
 
     app = FastAPI(title="Music Arrangement Analyst", version="0.1.0")
     app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+    FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
+    FRONTEND_INDEX = FRONTEND_DIST / "index.html"
+
+    @app.get("/", include_in_schema=False)
+    def root():
+        if FRONTEND_INDEX.exists():
+            return FileResponse(FRONTEND_INDEX)
+        return {"service": "music-arrangement-analyst", "status": "ok", "frontend": "run npm run dev in frontend/"}
+
+    if (FRONTEND_DIST / "assets").is_dir():
+        app.mount("/assets", StaticFiles(directory=FRONTEND_DIST / "assets"), name="frontend-assets")
 
     @app.get("/api/health")
     def health():
