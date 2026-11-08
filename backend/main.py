@@ -5,7 +5,9 @@ import os
 import shutil
 import tempfile
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Annotated
 
 from backend.ai.music_reasoner import build_reasoning
 from backend.ai.report_generator import to_markdown
@@ -19,12 +21,27 @@ from backend.arrangement.arrangement_analyzer import arrangement_advice
 from backend.arrangement.timeline_generator import build_timeline
 from backend.midi.midi_exporter import generate_midi_bundle
 from backend.separation.stem_separator import separate_stems
+from backend.sources.manager import (
+    AudioSourceManager,
+    AudioUnavailableError,
+    parse_source_metadata,
+    sha256_file,
+)
+from backend.sources.qq_music.qq_auth import QQAuth
+from backend.sources.qq_music.qq_client import QQMusicClient, QQMusicError
+from backend.sources.qq_music.qq_metadata import QQMetadataService
+from backend.sources.qq_music.qq_search import QQSearchService
 
 DATA_DIR = Path(os.getenv("MA_DATA_DIR", Path(__file__).resolve().parent.parent / "data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
+qq_client = QQMusicClient()
+qq_search = QQSearchService(qq_client, DATA_DIR / "cache" / "qq_music")
+qq_metadata = QQMetadataService(qq_client)
+qq_auth = QQAuth()
+source_manager = AudioSourceManager(DATA_DIR, qq_client)
 
 
-def run_analysis(path: str | Path) -> dict:
+def run_analysis(path: str | Path, source_metadata: dict | None = None) -> dict:
     audio = analyze_audio(path)
     key = detect_key(audio)
     chords = detect_chords(audio, audio.get("duration", 0.0))
@@ -35,16 +52,26 @@ def run_analysis(path: str | Path) -> dict:
     result["reasoning"] = build_reasoning(result)
     result["advice"] = arrangement_advice(result)
     result["report_markdown"] = to_markdown(result)
+    source = source_manager.local_source(source_metadata).to_dict()
+    source["audio_hash_sha256"] = source.get("audio_hash_sha256") or sha256_file(path)
+    result["source"] = source
+    result["analyzed_at"] = datetime.now(UTC).isoformat()
+    return result
+
+
+def save_analysis(result: dict) -> dict:
+    target = DATA_DIR / f"{result['id']}.json"
+    target.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     return result
 
 
 try:
-    from fastapi import FastAPI, File, HTTPException, UploadFile
-    from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
+    from fastapi import Body, FastAPI, File, Form, HTTPException, Query, UploadFile
     from fastapi.middleware.cors import CORSMiddleware
+    from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
     from fastapi.staticfiles import StaticFiles
 
-    app = FastAPI(title="Music Arrangement Analyst", version="0.1.0")
+    app = FastAPI(title="Music Arrangement Analyst", version="0.2.0")
     app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
     FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
@@ -64,16 +91,18 @@ try:
         return {"status": "ok", "service": "music-arrangement-analyst"}
 
     @app.post("/api/analyze")
-    async def analyze(file: UploadFile = File(...)):
+    async def analyze(
+        file: Annotated[UploadFile, File()],
+        source_metadata: Annotated[str | None, Form()] = None,
+    ):
         suffix = Path(file.filename or "audio.wav").suffix or ".wav"
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix, dir=DATA_DIR) as tmp:
             shutil.copyfileobj(file.file, tmp)
             temp_path = Path(tmp.name)
         try:
-            result = run_analysis(temp_path)
-            target = DATA_DIR / f"{result['id']}.json"
-            target.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
-            return JSONResponse(result)
+            metadata = parse_source_metadata(source_metadata)
+            metadata.setdefault("audio_origin", "local_upload")
+            return JSONResponse(save_analysis(run_analysis(temp_path, metadata)))
         except Exception as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         finally:
@@ -98,12 +127,68 @@ try:
         return {"files": files}
 
     @app.post("/api/separate")
-    async def separate(file: UploadFile = File(...)):
+    async def separate(file: Annotated[UploadFile, File()]):
         suffix = Path(file.filename or "audio.wav").suffix or ".wav"
         target = DATA_DIR / f"upload-{uuid.uuid4().hex}{suffix}"
         with target.open("wb") as handle:
             shutil.copyfileobj(file.file, handle)
         return separate_stems(target, DATA_DIR / "stems")
+
+    @app.get("/api/sources/qq/search")
+    def search_qq(
+        q: str = Query(min_length=1, max_length=100),
+        scope: str = Query("all", pattern="^(all|song|artist|album)$"),
+        page: int = Query(1, ge=1),
+        page_size: int = Query(20, ge=1, le=50),
+    ):
+        try:
+            return qq_search.search(q, scope, page, page_size).to_dict()
+        except (QQMusicError, ValueError) as exc:
+            raise HTTPException(status_code=503 if isinstance(exc, QQMusicError) else 422, detail=str(exc)) from exc
+
+    @app.get("/api/sources/qq/songs/{song_id}")
+    def qq_song(song_id: str):
+        try:
+            track = qq_metadata.song(song_id)
+            artists = [{"id": artist_id, "name": name} for artist_id, name in zip(track.artist_ids, track.artists)]
+            album = {"id": track.album_id, "name": track.album, "cover_url": track.cover_url}
+            return {"track": track.to_dict(), "artists": artists, "album": album}
+        except QQMusicError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    @app.post("/api/sources/qq/import")
+    def import_qq(payload: Annotated[dict, Body()]):
+        song_id = str(payload.get("song_id") or "").strip()
+        if not song_id:
+            raise HTTPException(status_code=422, detail="song_id is required")
+        try:
+            return save_analysis(source_manager.import_qq_track(song_id, run_analysis))
+        except AudioUnavailableError as exc:
+            raise HTTPException(status_code=409, detail={"code": "local_upload_required", "message": exc.reason, "track": exc.track.to_dict()}) from exc
+        except QQMusicError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    @app.get("/api/sources/qq/auth/status")
+    def qq_auth_status():
+        return qq_auth.status().to_dict()
+
+    @app.post("/api/sources/qq/auth/start")
+    def qq_auth_start():
+        try:
+            return {"authorization_url": qq_auth.authorization_url(), "note": "QQ Connect 身份授权不授予 QQ 音乐会员音频权限。"}
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.get("/api/sources/qq/auth/callback")
+    def qq_auth_callback(code: str, state: str):
+        try:
+            return qq_auth.handle_callback(code, state).to_dict()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/sources/qq/auth/logout")
+    def qq_auth_logout():
+        return qq_auth.logout().to_dict()
 except ImportError:
     app = None
 
@@ -111,4 +196,10 @@ except ImportError:
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("backend.main:app", host="0.0.0.0", port=int(os.getenv("PORT", "8000")), reload=True)
+    uvicorn.run(
+        "backend.main:app",
+        host="0.0.0.0",
+        port=int(os.getenv("PORT", "8000")),
+        reload=True,
+        access_log=False,
+    )

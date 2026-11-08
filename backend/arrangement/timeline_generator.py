@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-
 TRACK_ORDER = ["Vocals", "Piano", "Guitar", "Bass", "Drums", "Strings", "Synth", "Other"]
 
 

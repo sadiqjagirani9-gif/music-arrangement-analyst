@@ -7,5 +7,7 @@ librosa>=0.10.2,<1
 pretty-midi>=0.2.10,<1
 pytest>=8,<9
 ruff>=0.6,<1
+keyring>=25,<26
+httpx>=0.27,<1
 # Optional heavy separation: install separately when GPU/CPU model use is desired.
 # demucs>=4,<5

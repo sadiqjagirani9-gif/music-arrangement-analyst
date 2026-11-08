@@ -10,10 +10,9 @@ import audioop
 import math
 import wave
 from pathlib import Path
-from typing import Tuple
 
 
-def load_audio(path: str | Path, target_sr: int = 22050) -> Tuple[list[float], int]:
+def load_audio(path: str | Path, target_sr: int = 22050) -> tuple[list[float], int]:
     """Return mono float samples and sample rate, with an optional librosa path."""
     path = Path(path)
     try:

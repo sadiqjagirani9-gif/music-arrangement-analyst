@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
-from statistics import mean
 
 from backend.utils.audio_loader import duration_seconds, load_audio, rms
 
@@ -30,7 +29,6 @@ def analyze_audio(path: str | Path) -> dict:
     }
     try:
         import librosa  # type: ignore
-
         import numpy as np  # type: ignore
 
         y = np.asarray(samples, dtype=float)
