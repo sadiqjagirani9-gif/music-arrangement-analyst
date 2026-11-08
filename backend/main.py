@@ -19,6 +19,8 @@ from backend.analyzers.rhythm_analyzer import analyze_rhythm
 from backend.analyzers.structure_detector import detect_structure
 from backend.arrangement.arrangement_analyzer import arrangement_advice
 from backend.arrangement.timeline_generator import build_timeline
+from backend.capture.manager import CaptureManager, CaptureStateError
+from backend.capture.models import CaptureConfig
 from backend.midi.midi_exporter import generate_midi_bundle
 from backend.separation.stem_separator import separate_stems
 from backend.sources.manager import (
@@ -65,13 +67,20 @@ def save_analysis(result: dict) -> dict:
     return result
 
 
+def analyze_capture(path: Path, metadata: dict) -> dict:
+    return save_analysis(run_analysis(path, metadata))
+
+
+capture_manager = CaptureManager(DATA_DIR / "captures", analyze_capture)
+
+
 try:
     from fastapi import Body, FastAPI, File, Form, HTTPException, Query, UploadFile
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
     from fastapi.staticfiles import StaticFiles
 
-    app = FastAPI(title="Music Arrangement Analyst", version="0.2.0")
+    app = FastAPI(title="Music Arrangement Analyst", version="0.3.0")
     app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
     FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
@@ -133,6 +142,69 @@ try:
         with target.open("wb") as handle:
             shutil.copyfileobj(file.file, handle)
         return separate_stems(target, DATA_DIR / "stems")
+
+    @app.get("/api/capture/devices")
+    def capture_devices():
+        devices = capture_manager.list_devices()
+        return {"devices": devices, "preferred_backend": "soundcard_wasapi", "supported_sample_rates": [44100, 48000]}
+
+    @app.post("/api/capture/sessions")
+    def start_capture(payload: Annotated[dict, Body()]):
+        try:
+            config = CaptureConfig(
+                device_id=str(payload.get("device_id") or ""),
+                sample_rate=int(payload.get("sample_rate") or 48000),
+                channels=int(payload.get("channels") or 2),
+                max_duration_seconds=float(payload["max_duration_seconds"]) if payload.get("max_duration_seconds") else None,
+                auto_analyze=bool(payload.get("auto_analyze", True)),
+            )
+            return capture_manager.start(config)
+        except (ValueError, CaptureStateError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.get("/api/capture/sessions/{session_id}")
+    def capture_status(session_id: str):
+        try:
+            return capture_manager.get(session_id).to_dict()
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/api/capture/sessions/{session_id}/pause")
+    def pause_capture(session_id: str):
+        try:
+            return capture_manager.pause(session_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except CaptureStateError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post("/api/capture/sessions/{session_id}/resume")
+    def resume_capture(session_id: str):
+        try:
+            return capture_manager.resume(session_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except CaptureStateError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post("/api/capture/sessions/{session_id}/stop")
+    def stop_capture(session_id: str):
+        try:
+            return capture_manager.stop(session_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except CaptureStateError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.get("/api/capture/sessions/{session_id}/audio.wav")
+    def download_capture(session_id: str):
+        try:
+            path = capture_manager.path(session_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        if not path.exists() or path.stat().st_size < 44:
+            raise HTTPException(status_code=409, detail="录音文件尚未生成")
+        return FileResponse(path, media_type="audio/wav", filename=f"live-capture-{session_id}.wav")
 
     @app.get("/api/sources/qq/search")
     def search_qq(

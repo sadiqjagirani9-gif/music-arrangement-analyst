@@ -1,6 +1,7 @@
 # 第三方许可证说明
 
 - FastAPI（MIT）、Uvicorn（BSD-3-Clause）、NumPy（BSD-3-Clause）、SciPy（BSD-3-Clause）、librosa（ISC）、pretty_midi（Apache-2.0）、React（MIT）、Vite（MIT）、Lucide（ISC）、keyring（MIT）均允许本项目在保留其各自声明的前提下使用。
+- SoundCard 0.4.6 使用 BSD 3-Clause；python-sounddevice 使用 MIT。两者仅提供操作系统音频设备访问，不授予任何录制内容版权。
 - Demucs 为可选依赖，代码为 MIT；其下载模型、训练数据和输出内容需另行遵守上游说明与内容版权。
 - QQ 音乐商标、网页接口响应、歌曲元数据、封面、音频及用户凭据不属于本项目 MIT 许可证授权范围。
 
